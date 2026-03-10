@@ -1,20 +1,19 @@
 # %cd /content/Qwen3-TTS-Colab
-import contextlib
-import gc
+from subtitle import subtitle_maker
+from process_text import text_chunk
+from qwen_tts import Qwen3TTSModel
+import subprocess
 import os
-
 import gradio as gr
 import numpy as np
-import soundfile as sf
 import torch
-from huggingface_hub import login, snapshot_download
+import soundfile as sf
 from pydub import AudioSegment
 from pydub.silence import split_on_silence
-from qwen_tts import Qwen3TTSModel
-
+from huggingface_hub import snapshot_download
 from hf_downloader import download_model
-from process_text import text_chunk
-from subtitle import subtitle_maker
+import gc
+from huggingface_hub import login
 
 HF_TOKEN = os.getenv("HF_TOKEN")
 if HF_TOKEN:
@@ -48,7 +47,7 @@ def get_model_path(model_type: str, model_size: str) -> str:
     """Get model path based on type and size."""
     try:
         return snapshot_download(f"Qwen/Qwen3-TTS-12Hz-{model_size}-{model_type}")
-    except Exception:
+    except Exception as e:
         return download_model(
             f"Qwen/Qwen3-TTS-12Hz-{model_size}-{model_type}",
             download_folder="./qwen_tts_model",
@@ -61,8 +60,10 @@ def clear_other_models(keep_key=None):
     global loaded_models
     keys_to_delete = [k for k in loaded_models if k != keep_key]
     for k in keys_to_delete:
-        with contextlib.suppress(Exception):
+        try:
             del loaded_models[k]
+        except Exception:
+            pass
     for k in keys_to_delete:
         loaded_models.pop(k, None)
     gc.collect()
@@ -104,8 +105,7 @@ def _normalize_audio(wav, eps=1e-12, clip=True):
         if m > 1.0 + 1e-6:
             y = y / (m + eps)
     else:
-        msg = f"Unsupported dtype: {x.dtype}"
-        raise TypeError(msg)
+        raise TypeError(f"Unsupported dtype: {x.dtype}")
     if clip:
         y = np.clip(y, -1.0, 1.0)
     if y.ndim > 1:
@@ -137,7 +137,7 @@ def _audio_to_tuple(audio):
 
 
 def transcribe_reference(audio_path, mode_input, language="English"):
-    """Use subtitle_maker to extract text from the reference audio."""
+    """Uses subtitle_maker to extract text from the reference audio."""
     should_run = False
     if isinstance(mode_input, bool):
         should_run = mode_input
@@ -152,25 +152,22 @@ def transcribe_reference(audio_path, mode_input, language="English"):
     try:
         results = subtitle_maker(audio_path, src_lang)
         transcript = results[7]
-        return transcript or "Could not detect speech."
+        return transcript if transcript else "Could not detect speech."
     except Exception as e:
         print(f"Transcription Error: {e}")
-        return f"Error during transcription: {e!s}"
+        return f"Error during transcription: {str(e)}"
 
 
 # --- Audio Processing Utils (Disk Based) ---
 
 
 def remove_silence_function(file_path, minimum_silence=100):
-    """Remove silence from an audio file using Pydub."""
+    """Removes silence from an audio file using Pydub."""
     try:
         output_path = file_path.replace(".wav", "_no_silence.wav")
         sound = AudioSegment.from_wav(file_path)
         audio_chunks = split_on_silence(
-            sound,
-            min_silence_len=minimum_silence,
-            silence_thresh=-45,
-            keep_silence=50,
+            sound, min_silence_len=minimum_silence, silence_thresh=-45, keep_silence=50
         )
         combined = AudioSegment.empty()
         for chunk in audio_chunks:
@@ -183,7 +180,7 @@ def remove_silence_function(file_path, minimum_silence=100):
 
 
 def process_audio_output(audio_path, make_subtitle, remove_silence, language="Auto"):
-    """Handle Silence Removal and Subtitle Generation."""
+    """Handles Silence Removal and Subtitle Generation."""
     # 1. Remove Silence
     final_audio_path = audio_path
     if remove_silence:
@@ -205,9 +202,10 @@ def process_audio_output(audio_path, make_subtitle, remove_silence, language="Au
 
 
 def stitch_chunk_files(chunk_files, output_filename):
-    """Take a list of file paths.
-    Stitche them into one file.
-    Delete the temporary chunk files.
+    """
+    Takes a list of file paths.
+    Stitches them into one file.
+    Deletes the temporary chunk files.
     """
     if not chunk_files:
         return None
@@ -276,10 +274,7 @@ def generate_voice_design(text, language, voice_description, remove_silence, mak
 
         # 4. Post-Process
         final_audio, srt1, srt2, srt3, srt4 = process_audio_output(
-            stitched_file,
-            make_subs,
-            remove_silence,
-            language,
+            stitched_file, make_subs, remove_silence, language
         )
 
         return final_audio, "Generation Success!", srt1, srt2, srt3, srt4
@@ -319,10 +314,7 @@ def generate_custom_voice(text, language, speaker, instruct, model_size, remove_
 
         stitched_file = stitch_chunk_files(chunk_files, tts_filename)
         final_audio, srt1, srt2, srt3, srt4 = process_audio_output(
-            stitched_file,
-            make_subs,
-            remove_silence,
-            language,
+            stitched_file, make_subs, remove_silence, language
         )
         return final_audio, "Generation Success!", srt1, srt2, srt3, srt4
 
@@ -331,14 +323,7 @@ def generate_custom_voice(text, language, speaker, instruct, model_size, remove_
 
 
 def smart_generate_clone(
-    ref_audio,
-    ref_text,
-    target_text,
-    language,
-    mode,
-    model_size,
-    remove_silence,
-    make_subs,
+    ref_audio, ref_text, target_text, language, mode, model_size, remove_silence, make_subs
 ):
     if not target_text or not target_text.strip():
         return None, "Error: Target text is required.", None, None, None, None
@@ -391,10 +376,7 @@ def smart_generate_clone(
         # 4. Stitch & Process
         stitched_file = stitch_chunk_files(chunk_files, tts_filename)
         final_audio, srt1, srt2, srt3, srt4 = process_audio_output(
-            stitched_file,
-            make_subs,
-            remove_silence,
-            language,
+            stitched_file, make_subs, remove_silence, language
         )
         return final_audio, f"Success! Mode: {mode}", srt1, srt2, srt3, srt4
 
@@ -432,9 +414,7 @@ def build_ui():
                             placeholder="Enter the text you want to convert to speech...",
                         )
                         design_language = gr.Dropdown(
-                            label="Language",
-                            choices=LANGUAGES,
-                            value="Auto",
+                            label="Language", choices=LANGUAGES, value="Auto"
                         )
                         design_instruct = gr.Textbox(
                             label="Voice Description",
@@ -446,12 +426,10 @@ def build_ui():
                         with gr.Accordion("More options", open=False):
                             with gr.Row():
                                 design_rem_silence = gr.Checkbox(
-                                    label="Remove Silence",
-                                    value=False,
+                                    label="Remove Silence", value=False
                                 )
                                 design_make_subs = gr.Checkbox(
-                                    label="Generate Subtitles",
-                                    value=False,
+                                    label="Generate Subtitles", value=False
                                 )
 
                     with gr.Column(scale=2):
@@ -494,16 +472,10 @@ def build_ui():
 
                         with gr.Row():
                             clone_language = gr.Dropdown(
-                                label="Language",
-                                choices=LANGUAGES,
-                                value="Auto",
-                                scale=1,
+                                label="Language", choices=LANGUAGES, value="Auto", scale=1
                             )
                             clone_model_size = gr.Dropdown(
-                                label="Model Size",
-                                choices=MODEL_SIZES,
-                                value="1.7B",
-                                scale=1,
+                                label="Model Size", choices=MODEL_SIZES, value="1.7B", scale=1
                             )
                             clone_mode = gr.Dropdown(
                                 label="Mode",
@@ -519,8 +491,7 @@ def build_ui():
                             with gr.Row():
                                 clone_rem_silence = gr.Checkbox(label="Remove Silence", value=False)
                                 clone_make_subs = gr.Checkbox(
-                                    label="Generate Subtitles",
-                                    value=False,
+                                    label="Generate Subtitles", value=False
                                 )
 
                     with gr.Column(scale=2):
@@ -569,14 +540,10 @@ def build_ui():
                         )
                         with gr.Row():
                             tts_language = gr.Dropdown(
-                                label="Language",
-                                choices=LANGUAGES,
-                                value="English",
+                                label="Language", choices=LANGUAGES, value="English"
                             )
                             tts_speaker = gr.Dropdown(
-                                label="Speaker",
-                                choices=SPEAKERS,
-                                value="Ryan",
+                                label="Speaker", choices=SPEAKERS, value="Ryan"
                             )
                         with gr.Row():
                             tts_instruct = gr.Textbox(
@@ -585,9 +552,7 @@ def build_ui():
                                 placeholder="e.g., Speak in a cheerful and energetic tone",
                             )
                             tts_model_size = gr.Dropdown(
-                                label="Size",
-                                choices=MODEL_SIZES,
-                                value="1.7B",
+                                label="Size", choices=MODEL_SIZES, value="1.7B"
                             )
                         tts_btn = gr.Button("Generate Speech", variant="primary")
                         with gr.Accordion("More options", open=False):
